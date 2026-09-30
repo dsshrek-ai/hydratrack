@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1d6fa5">
+<title>Goals | HydraTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="bar">
+    <h1>💧 HydraTrack</h1>
+    <nav>
+      <a href="index.html">Today</a>
+      <a href="history.html">History</a>
+      <a href="stats.html">Stats</a>
+      <a href="goals.html" aria-current="page">Goals</a>
+      <a href="containers.html">Containers</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <div id="status"></div>
+  <div id="content">Loading&hellip;</div>
+</main>
+<script src="js/api.js"></script>
+<script>
+  const contentEl = document.getElementById('content');
+  let GOALS = [];
+  let CONTAINERS = [];
+  let editing = null;   // null = closed, {} = new, goal = editing that one
+
+  function todayYmd() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function datesLabel(g) {
+    const from = fmtDate(g.StartDate, { month: 'short', day: 'numeric', year: 'numeric' });
+    if (g.EndDate) return `${from} – ${fmtDate(g.EndDate, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    return `from ${from}`;
+  }
+
+  function itemHtml(g) {
+    const detail = g.ContainerId
+      ? `${fmtOz(g.Quantity)} × ${escapeHtml(g.ContainerName)} (${fmtOz(g.ContainerOunces)} oz) = ${fmtOz(g.TargetOunces)} oz`
+      : `${fmtOz(g.TargetOunces)} oz`;
+    const warn = g.ContainerId && g.ContainerActive === false && g.Active
+      ? '<div class="meta" style="color:var(--amber)">Its container is inactive, so it can only be filled by entering ounces.</div>' : '';
+    return `
+      <div class="item ${g.Active ? '' : 'inactive'}">
+        <span class="big-icon" aria-hidden="true">${escapeHtml(g.ContainerId ? (g.ContainerIcon || '💧') : '🎯')}</span>
+        <div class="info">
+          <div class="name">${escapeHtml(goalTitle(g))}</div>
+          <div class="meta">${g.Name ? detail + ' · ' : (g.ContainerId ? fmtOz(g.TargetOunces) + ' oz · ' : '')}${weekdaysLabel(g.Weekdays)} · ${datesLabel(g)}</div>
+          ${warn}
+        </div>
+        <div class="actions">
+          <button type="button" class="btn secondary small" data-edit="${g.Id}">Edit</button>
+          <button type="button" class="btn ${g.Active ? 'danger' : 'secondary'} small" data-toggle="${g.Id}">${g.Active ? 'Deactivate' : 'Reactivate'}</button>
+        </div>
+      </div>`;
+  }
+
+  function formHtml(g) {
+    const isNew = !g.Id;
+    const usable = CONTAINERS.filter(c => c.Active || c.Id === g.ContainerId);
+    const mode = g.Id ? (g.ContainerId ? 'container' : 'ounces') : (usable.length ? 'container' : 'ounces');
+    const days = g.Weekdays || [1, 2, 3, 4, 5, 6, 7];
+    const containerOptions = usable.map(c =>
+      `<option value="${c.Id}" ${c.Id === g.ContainerId ? 'selected' : ''}>${escapeHtml((c.Icon ? c.Icon + ' ' : '') + c.Name)} — ${fmtOz(c.Ounces)} oz${c.Active ? '' : ' (inactive)'}</option>`).join('');
+    const dayToggles = [1, 2, 3, 4, 5, 6, 7].map(n => `
+      <label class="day-toggle"><input type="checkbox" class="f-day" value="${n}" ${days.includes(n) ? 'checked' : ''}><span>${WEEKDAY_SHORT[n]}</span></label>`).join('');
+    return `
+      <div class="card" id="form-card">
+        <h3>${isNew ? 'Add a goal' : 'Edit goal'}</h3>
+        <label>Goal type</label>
+        <div class="row">
+          <label class="inline"><input type="radio" name="f-mode" value="container" ${mode === 'container' ? 'checked' : ''} ${usable.length ? '' : 'disabled'}> A number of containers</label>
+          <label class="inline"><input type="radio" name="f-mode" value="ounces" ${mode === 'ounces' ? 'checked' : ''}> A number of ounces</label>
+        </div>
+        ${usable.length ? '' : '<p class="muted small">Add a container first to set a container goal — <a href="containers.html">Containers</a>.</p>'}
+        <div id="f-container-fields">
+          <label for="f-container">Container</label>
+          <select id="f-container">${containerOptions}</select>
+          <label for="f-qty">How many per day</label>
+          <input type="number" id="f-qty" min="0" step="any" inputmode="decimal" value="${g.Quantity ?? 1}" style="max-width:7rem">
+        </div>
+        <div id="f-ounce-fields">
+          <label for="f-oz">Ounces per day</label>
+          <input type="number" id="f-oz" min="0" step="any" inputmode="decimal" value="${g.ContainerId ? '' : (g.TargetOunces ?? '')}" placeholder="e.g. 20" style="max-width:7rem">
+          <p class="muted small">Counts any water not already credited to a container goal — entered ounces, or containers beyond your goal.</p>
+        </div>
+        <p id="f-preview" class="note" style="margin-top:0.8rem"></p>
+        <label for="f-name">Name <span class="muted small">(optional)</span></label>
+        <input type="text" id="f-name" maxlength="150" value="${escapeHtml(g.Name || '')}" placeholder="e.g. Morning tumblers">
+        <label>Days</label>
+        <label class="inline" style="margin-top:0.3rem"><input type="checkbox" id="f-all" ${days.length === 7 ? 'checked' : ''}> All days</label>
+        <div class="days">${dayToggles}</div>
+        <div class="row" style="align-items:flex-start">
+          <div><label for="f-start">Start date</label><input type="date" id="f-start" value="${g.StartDate || todayYmd()}"></div>
+          <div><label for="f-end">End date <span class="muted small">(optional)</span></label><input type="date" id="f-end" value="${g.EndDate || ''}"></div>
+        </div>
+        <label for="f-sort">Display order</label>
+        <input type="number" id="f-sort" step="1" value="${g.SortOrder ?? nextSort()}" style="max-width:7rem">
+        ${!isNew ? '<p class="muted small">Changes apply from today on. Past days keep the targets they had.</p>' : ''}
+        <div id="f-error" class="field-error"></div>
+        <div class="form-actions">
+          <button type="button" class="btn" id="f-save">${isNew ? 'Add goal' : 'Save'}</button>
+          <button type="button" class="btn secondary" id="f-cancel">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  function nextSort() {
+    return GOALS.reduce((m, g) => Math.max(m, g.SortOrder), 0) + 1;
+  }
+
+  function currentMode() {
+    const r = contentEl.querySelector('input[name="f-mode"]:checked');
+    return r ? r.value : 'ounces';
+  }
+
+  function checkedDays() {
+    return [...contentEl.querySelectorAll('.f-day')].filter(x => x.checked).map(x => Number(x.value));
+  }
+
+  function updateForm() {
+    const mode = currentMode();
+    document.getElementById('f-container-fields').style.display = mode === 'container' ? '' : 'none';
+    document.getElementById('f-ounce-fields').style.display = mode === 'ounces' ? '' : 'none';
+    let target = 0;
+    if (mode === 'container') {
+      const c = CONTAINERS.find(x => x.Id === Number(document.getElementById('f-container').value));
+      const qty = Number(document.getElementById('f-qty').value) || 0;
+      target = c ? qty * c.Ounces : 0;
+      document.getElementById('f-preview').textContent = c
+        ? `${fmtOz(qty)} × ${c.Name} (${fmtOz(c.Ounces)} oz) = ${fmtOz(target)} oz a day, ${weekdaysLabel(checkedDays()).toLowerCase()}`
+        : 'Pick a container.';
+    } else {
+      target = Number(document.getElementById('f-oz').value) || 0;
+      document.getElementById('f-preview').textContent = `${fmtOz(target)} oz a day, ${weekdaysLabel(checkedDays()).toLowerCase()}`;
+    }
+  }
+
+  function render() {
+    const active = GOALS.filter(g => g.Active);
+    const inactive = GOALS.filter(g => !g.Active);
+    contentEl.innerHTML = `
+      <h2>Goals</h2>
+      <p class="muted">Every goal that applies on a day adds to that day's ounce target. Mix containers and ounces however you like.</p>
+      ${editing ? formHtml(editing) : `<p><button type="button" class="btn" id="add-btn">+ Add a goal</button></p>`}
+      <div class="card">
+        ${active.length ? active.map(itemHtml).join('') : '<p class="muted">No active goals yet.</p>'}
+      </div>
+      ${inactive.length ? `<h2>Inactive</h2><p class="muted small">Not counted toward new days. Past days that used them keep their history.</p>
+        <div class="card">${inactive.map(itemHtml).join('')}</div>` : ''}`;
+    wire();
+  }
+
+  function wire() {
+    const add = document.getElementById('add-btn');
+    if (add) add.addEventListener('click', () => { editing = {}; render(); });
+    contentEl.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+      editing = GOALS.find(g => g.Id === Number(b.dataset.edit));
+      render();
+      document.getElementById('form-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
+    contentEl.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => toggle(Number(b.dataset.toggle))));
+
+    const save = document.getElementById('f-save');
+    if (!save) return;
+    save.addEventListener('click', submit);
+    document.getElementById('f-cancel').addEventListener('click', () => { editing = null; render(); });
+    contentEl.querySelectorAll('input[name="f-mode"], #f-container, #f-qty, #f-oz').forEach(x => x.addEventListener('input', updateForm));
+    contentEl.querySelectorAll('input[name="f-mode"], #f-container').forEach(x => x.addEventListener('change', updateForm));
+    const all = document.getElementById('f-all');
+    all.addEventListener('change', () => {
+      contentEl.querySelectorAll('.f-day').forEach(x => { x.checked = all.checked; });
+      updateForm();
+    });
+    contentEl.querySelectorAll('.f-day').forEach(x => x.addEventListener('change', () => {
+      all.checked = checkedDays().length === 7;
+      updateForm();
+    }));
+    updateForm();
+  }
+
+  async function submit() {
+    const errEl = document.getElementById('f-error');
+    const mode = currentMode();
+    const weekdays = checkedDays();
+    const startDate = document.getElementById('f-start').value;
+    const endDate = document.getElementById('f-end').value;
+    const payload = {
+      id: editing.Id || 0,
+      name: document.getElementById('f-name').value.trim(),
+      weekdays,
+      startDate,
+      endDate,
+      sortOrder: Number(document.getElementById('f-sort').value) || 0,
+      active: editing.Id ? editing.Active : true,
+    };
+    if (mode === 'container') {
+      payload.containerId = Number(document.getElementById('f-container').value);
+      payload.quantity = Number(document.getElementById('f-qty').value);
+      if (!(payload.quantity > 0)) { errEl.textContent = 'Enter how many containers per day.'; return; }
+    } else {
+      payload.containerId = 0;
+      payload.targetOunces = Number(document.getElementById('f-oz').value);
+      if (!(payload.targetOunces > 0)) { errEl.textContent = 'Enter the ounces per day.'; return; }
+    }
+    if (!weekdays.length) { errEl.textContent = 'Pick at least one day.'; return; }
+    if (endDate && startDate && endDate < startDate) { errEl.textContent = 'The end date is before the start date.'; return; }
+    const btn = document.getElementById('f-save');
+    btn.disabled = true;
+    try {
+      await postAction('saveGoal', payload);
+      editing = null;
+      await load();
+    } catch (e) {
+      btn.disabled = false;
+      errEl.textContent = errorText(e, "Couldn't save. Try again.");
+    }
+  }
+
+  async function toggle(id) {
+    const g = GOALS.find(x => x.Id === id);
+    try {
+      await postAction('setGoalActive', { id, active: !g.Active });
+      showStatus('');
+      await load();
+    } catch (e) {
+      showStatus(errorText(e, "Couldn't update that goal. Try again."));
+    }
+  }
+
+  async function load() {
+    try {
+      const res = await fetchData('goals');
+      GOALS = res.Goals || [];
+      CONTAINERS = res.Containers || [];
+      render();
+    } catch (e) {
+      handleError(contentEl, e);
+    }
+  }
+
+  (async () => {
+    await captureSso();
+    await load();
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1d6fa5">
+<title>Stats | HydraTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="bar">
+    <h1>💧 HydraTrack</h1>
+    <nav>
+      <a href="index.html">Today</a>
+      <a href="history.html">History</a>
+      <a href="stats.html" aria-current="page">Stats</a>
+      <a href="goals.html">Goals</a>
+      <a href="containers.html">Containers</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <h2>Stats</h2>
+  <div id="content">Loading&hellip;</div>
+</main>
+<script src="js/api.js"></script>
+<script>
+  const contentEl = document.getElementById('content');
+
+  function days(n) { return n === 1 ? 'day' : 'days'; }
+
+  function tile(label, value, sub) {
+    return `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  }
+
+  function render(s) {
+    const gallons = s.TotalOuncesLogged / 128;
+    contentEl.innerHTML = `
+      <h3>Streaks</h3>
+      <div class="tiles">
+        ${tile('Logging streak', `${s.CurrentLoggingStreak} ${days(s.CurrentLoggingStreak)}`, `Best: ${s.LongestLoggingStreak} ${days(s.LongestLoggingStreak)}`)}
+        ${tile('Goal streak', `${s.CurrentGoalStreak} ${days(s.CurrentGoalStreak)}`, `Best: ${s.LongestGoalStreak} ${days(s.LongestGoalStreak)}`)}
+      </div>
+      <p class="muted small">Logging streak counts days you logged any water. Goal streak counts days you reached your target — days with no target are skipped, and today counts once you reach it.</p>
+      <h3 style="margin-top:1.2rem">Totals</h3>
+      <div class="tiles">
+        ${tile('Average per logged day', `${fmtOz(s.AverageDailyOunces)} oz`)}
+        ${tile('Goal completion rate', `${fmtOz(s.GoalCompletionRate)}%`, `${s.TotalGoalsMet} target ${days(s.TotalGoalsMet)} met`)}
+        ${tile('Lifetime water', `${Math.round(s.TotalOuncesLogged).toLocaleString()} oz`, `${gallons >= 10 ? Math.round(gallons) : gallons.toFixed(1)} gallons`)}
+        ${tile('Days logged', `${s.TotalDaysLogged}`, `Tracking since ${fmtDate(s.TrackingSince, { month: 'short', day: 'numeric', year: 'numeric' })}`)}
+      </div>`;
+  }
+
+  (async () => {
+    await captureSso();
+    try {
+      const res = await fetchData('stats');
+      render(res.Stats);
+    } catch (e) {
+      handleError(contentEl, e);
+    }
+  })();
+</script>
+</body>
+</html>

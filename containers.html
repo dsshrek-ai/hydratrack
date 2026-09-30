@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1d6fa5">
+<title>Containers | HydraTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="bar">
+    <h1>💧 HydraTrack</h1>
+    <nav>
+      <a href="index.html">Today</a>
+      <a href="history.html">History</a>
+      <a href="stats.html">Stats</a>
+      <a href="goals.html">Goals</a>
+      <a href="containers.html" aria-current="page">Containers</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <div id="status"></div>
+  <div id="content">Loading&hellip;</div>
+</main>
+<script src="js/api.js"></script>
+<script>
+  const contentEl = document.getElementById('content');
+  const ICONS = ['🥤', '🥛', '🍶', '🧴', '☕', '🍵', '🫖', '💧', '🧊', '🍼'];
+  let CONTAINERS = [];
+  let editing = null;   // null = closed, {} = new, container = editing that one
+
+  function itemHtml(c) {
+    return `
+      <div class="item ${c.Active ? '' : 'inactive'}">
+        <span class="big-icon" aria-hidden="true">${escapeHtml(c.Icon || '💧')}</span>
+        <div class="info">
+          <div class="name">${escapeHtml(c.Name)}${c.QuickLog && c.Active ? '<span class="tag">Quick log</span>' : ''}</div>
+          <div class="meta">${fmtOz(c.Ounces)} oz · order ${c.SortOrder}</div>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn secondary small" data-edit="${c.Id}">Edit</button>
+          <button type="button" class="btn ${c.Active ? 'danger' : 'secondary'} small" data-toggle="${c.Id}">${c.Active ? 'Deactivate' : 'Reactivate'}</button>
+        </div>
+      </div>`;
+  }
+
+  function formHtml(c) {
+    const isNew = !c.Id;
+    const icon = c.Icon || '';
+    const iconChoices = ['', ...ICONS].map(i => `
+      <label class="day-toggle"><input type="radio" name="icon" value="${i}" ${i === icon ? 'checked' : ''}><span>${i || 'None'}</span></label>`).join('');
+    return `
+      <div class="card" id="form-card">
+        <h3>${isNew ? 'Add a container' : 'Edit ' + escapeHtml(c.Name)}</h3>
+        <label for="f-name">Name</label>
+        <input type="text" id="f-name" maxlength="100" value="${escapeHtml(c.Name || '')}" placeholder="e.g. Blue Tumbler">
+        <label for="f-oz">Size (ounces)</label>
+        <input type="number" id="f-oz" min="0" step="any" inputmode="decimal" value="${c.Ounces ?? ''}" placeholder="e.g. 24">
+        ${!isNew ? '<p class="muted small">Changing the size only affects today and later — drinks already logged keep the amount they had.</p>' : ''}
+        <label>Icon</label>
+        <div class="icon-choices">${iconChoices}</div>
+        <label class="inline" style="margin-top:0.9rem"><input type="checkbox" id="f-quick" ${c.QuickLog !== false ? 'checked' : ''}> Show as a one-tap button on Today</label>
+        <label for="f-sort">Display order</label>
+        <input type="number" id="f-sort" step="1" value="${c.SortOrder ?? nextSort()}" style="max-width:7rem">
+        <div id="f-error" class="field-error"></div>
+        <div class="form-actions">
+          <button type="button" class="btn" id="f-save">${isNew ? 'Add container' : 'Save'}</button>
+          <button type="button" class="btn secondary" id="f-cancel">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  function nextSort() {
+    return CONTAINERS.reduce((m, c) => Math.max(m, c.SortOrder), 0) + 1;
+  }
+
+  function render() {
+    const active = CONTAINERS.filter(c => c.Active);
+    const inactive = CONTAINERS.filter(c => !c.Active);
+    contentEl.innerHTML = `
+      <h2>Containers</h2>
+      <p class="muted">The cups, glasses, and bottles you drink from. Quick-log ones become one-tap buttons on Today.</p>
+      ${editing ? formHtml(editing) : `<p><button type="button" class="btn" id="add-btn">+ Add a container</button></p>`}
+      <div class="card">
+        ${active.length ? active.map(itemHtml).join('') : '<p class="muted">No containers yet.</p>'}
+      </div>
+      ${inactive.length ? `<h2>Inactive</h2><p class="muted small">Kept so your history stays accurate. Reactivate one to use it again.</p>
+        <div class="card">${inactive.map(itemHtml).join('')}</div>` : ''}`;
+    wire();
+  }
+
+  function wire() {
+    const add = document.getElementById('add-btn');
+    if (add) add.addEventListener('click', () => { editing = {}; render(); document.getElementById('f-name').focus(); });
+    contentEl.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+      editing = CONTAINERS.find(c => c.Id === Number(b.dataset.edit));
+      render();
+      document.getElementById('form-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
+    contentEl.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => toggle(Number(b.dataset.toggle))));
+    const save = document.getElementById('f-save');
+    if (save) {
+      save.addEventListener('click', submit);
+      document.getElementById('f-cancel').addEventListener('click', () => { editing = null; render(); });
+    }
+  }
+
+  async function submit() {
+    const errEl = document.getElementById('f-error');
+    const name = document.getElementById('f-name').value.trim();
+    const ounces = Number(document.getElementById('f-oz').value);
+    if (!name) { errEl.textContent = 'Give the container a name.'; return; }
+    if (!(ounces > 0)) { errEl.textContent = 'Enter its size in ounces.'; return; }
+    const iconInput = contentEl.querySelector('input[name="icon"]:checked');
+    const payload = {
+      id: editing.Id || 0,
+      name,
+      ounces,
+      icon: iconInput ? iconInput.value : '',
+      quickLog: document.getElementById('f-quick').checked,
+      sortOrder: Number(document.getElementById('f-sort').value) || 0,
+      active: editing.Id ? editing.Active : true,
+    };
+    const btn = document.getElementById('f-save');
+    btn.disabled = true;
+    try {
+      await postAction('saveContainer', payload);
+      editing = null;
+      await load();
+    } catch (e) {
+      btn.disabled = false;
+      errEl.textContent = errorText(e, "Couldn't save. Try again.");
+    }
+  }
+
+  async function toggle(id) {
+    const c = CONTAINERS.find(x => x.Id === id);
+    try {
+      await postAction('setContainerActive', { id, active: !c.Active });
+      showStatus('');
+      await load();
+    } catch (e) {
+      showStatus(errorText(e, "Couldn't update that container. Try again."));
+    }
+  }
+
+  async function load() {
+    try {
+      const res = await fetchData('containers');
+      CONTAINERS = res.Containers || [];
+      render();
+    } catch (e) {
+      handleError(contentEl, e);
+    }
+  }
+
+  (async () => {
+    await captureSso();
+    await load();
+  })();
+</script>
+</body>
+</html>

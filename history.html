@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1d6fa5">
+<title>History | HydraTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+<style>
+  .chart-wrap { position: relative; }
+  .tip {
+    position: absolute; pointer-events: none; background: #16242f; color: #fff;
+    border-radius: 8px; padding: 0.4rem 0.6rem; font-size: 0.82rem; line-height: 1.4;
+    white-space: nowrap; transform: translate(-50%, -100%); z-index: 5; display: none;
+  }
+  .summary { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; margin-bottom: 0.7rem; }
+  .summary b { color: var(--primary-dark); font-size: 1.15rem; }
+</style>
+</head>
+<body>
+<header class="site-header">
+  <div class="bar">
+    <h1>💧 HydraTrack</h1>
+    <nav>
+      <a href="index.html">Today</a>
+      <a href="history.html" aria-current="page">History</a>
+      <a href="stats.html">Stats</a>
+      <a href="goals.html">Goals</a>
+      <a href="containers.html">Containers</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <h2>History</h2>
+  <div class="segmented" role="group" aria-label="Date range">
+    <button type="button" data-range="30" aria-pressed="true">30 Days</button>
+    <button type="button" data-range="60" aria-pressed="false">60 Days</button>
+    <button type="button" data-range="90" aria-pressed="false">90 Days</button>
+    <button type="button" data-range="365" aria-pressed="false">1 Year</button>
+    <button type="button" data-range="all" aria-pressed="false">All Time</button>
+  </div>
+  <div id="content">Loading&hellip;</div>
+</main>
+<script src="js/api.js"></script>
+<script>
+  const contentEl = document.getElementById('content');
+  let range = '30';
+  let DATA = null;
+
+  // ---- bucketing: daily for short ranges, weekly / monthly for long ones ----
+  function bucketMode(days) {
+    if (range === '365') return 'week';
+    if (range === 'all') return days.length > 400 ? 'month' : (days.length > 90 ? 'week' : 'day');
+    return 'day';
+  }
+
+  function mondayOf(ymd) {
+    const d = parseDate(ymd);
+    const back = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - back);
+    return d;
+  }
+
+  function buckets(days, mode) {
+    if (mode === 'day') {
+      return days.map(d => ({
+        label: fmtDate(d.Date), long: fmtDate(d.Date, { weekday: 'short', month: 'short', day: 'numeric' }),
+        consumed: d.ConsumedOunces, target: d.TargetOunces, met: d.GoalMet,
+        targetDays: d.TargetOunces > 0 ? 1 : 0, metDays: d.GoalMet ? 1 : 0, n: 1,
+      }));
+    }
+    const map = new Map();
+    days.forEach(d => {
+      let key, label, long;
+      if (mode === 'week') {
+        const m = mondayOf(d.Date);
+        key = m.toDateString();
+        label = m.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        long = 'Week of ' + m.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      } else {
+        const p = parseDate(d.Date);
+        key = p.getFullYear() + '-' + p.getMonth();
+        label = p.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+        long = p.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+      }
+      if (!map.has(key)) map.set(key, { label, long, consumed: 0, target: 0, n: 0, targetDays: 0, metDays: 0 });
+      const b = map.get(key);
+      b.consumed += d.ConsumedOunces;
+      b.target += d.TargetOunces;
+      b.n += 1;
+      if (d.TargetOunces > 0) b.targetDays += 1;
+      if (d.GoalMet) b.metDays += 1;
+    });
+    // Aggregates plot the average day in the period.
+    return [...map.values()].map(b => ({ ...b, consumed: b.consumed / b.n, target: b.target / b.n, met: null }));
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 10;
+    const raw = v / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map(s => s * mag).find(s => s >= raw);
+    return { step, max: step * Math.ceil(v / step) };
+  }
+
+  // ---- chart ----
+  function chartSvg(bs, width) {
+    const H = 240, padL = 40, padR = 8, padT = 12, padB = 26;
+    const plotW = Math.max(40, width - padL - padR);
+    const plotH = H - padT - padB;
+    const peak = Math.max(...bs.map(b => Math.max(b.consumed, b.target)), 0) * 1.05;
+    const { step, max } = niceMax(peak || 10);
+    const y = v => padT + plotH - (v / max) * plotH;
+    const band = plotW / bs.length;
+    const barW = Math.max(1, Math.min(24, band - 2));
+
+    let grid = '';
+    for (let v = 0; v <= max + 1e-9; v += step) {
+      grid += `<line class="grid" x1="${padL}" x2="${padL + plotW}" y1="${y(v)}" y2="${y(v)}" stroke-width="1"/>
+               <text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${fmtOz(v)}</text>`;
+    }
+
+    let bars = '';
+    bs.forEach((b, i) => {
+      const cx = padL + band * i + band / 2;
+      const h = (b.consumed / max) * plotH;
+      if (h > 0) {
+        const cls = b.met === null ? 'bar-miss' : (b.met ? 'bar-met' : (b.target > 0 ? 'bar-miss' : 'bar-none'));
+        const r = Math.min(4, barW / 2, h);
+        const x0 = cx - barW / 2, x1 = cx + barW / 2, yb = padT + plotH, yt = yb - h;
+        // Rounded data-end on top, square at the baseline.
+        bars += `<path class="${cls}" d="M${x0},${yb} V${yt + r} Q${x0},${yt} ${x0 + r},${yt} H${x1 - r} Q${x1},${yt} ${x1},${yt + r} V${yb} Z"/>`;
+      }
+    });
+
+    // Target as a step line across each bucket's band (gaps where there's no target).
+    let path = '';
+    let drawing = false;
+    bs.forEach((b, i) => {
+      const xa = padL + band * i, xb = xa + band;
+      if (b.target > 0) {
+        path += (drawing ? ` L${xa},${y(b.target)}` : ` M${xa},${y(b.target)}`) + ` L${xb},${y(b.target)}`;
+        drawing = true;
+      } else {
+        drawing = false;
+      }
+    });
+
+    const labelEvery = Math.max(1, Math.ceil(bs.length / Math.max(2, Math.floor(plotW / 70))));
+    let xl = '';
+    bs.forEach((b, i) => {
+      if (i % labelEvery !== 0) return;
+      xl += `<text x="${padL + band * i + band / 2}" y="${H - 8}" text-anchor="middle">${escapeHtml(b.label)}</text>`;
+    });
+
+    const hits = bs.map((b, i) =>
+      `<rect class="hit" data-i="${i}" x="${padL + band * i}" y="${padT}" width="${band}" height="${plotH}" fill="transparent"/>`).join('');
+
+    return `<svg class="chart" viewBox="0 0 ${width} ${H}" width="${width}" height="${H}" role="img"
+              aria-label="Ounces per ${bucketMode(DATA.Days)} compared with the target">
+      ${grid}
+      <line x1="${padL}" x2="${padL + plotW}" y1="${padT + plotH}" y2="${padT + plotH}" stroke="#b9c8d4" stroke-width="1"/>
+      ${bars}
+      ${path ? `<path class="target" d="${path.trim()}"/>` : ''}
+      ${xl}
+      ${hits}
+    </svg>`;
+  }
+
+  function tipHtml(b, mode) {
+    if (mode === 'day') {
+      const met = b.target > 0 ? (b.met ? '✓ Goal met' : 'Goal not met') : 'No target';
+      return `<b>${escapeHtml(b.long)}</b><br>${fmtOz(b.consumed)} oz of ${fmtOz(b.target)} oz<br>${met}`;
+    }
+    return `<b>${escapeHtml(b.long)}</b><br>Avg ${fmtOz(b.consumed)} oz a day · target ${fmtOz(b.target)}<br>Met ${b.metDays} of ${b.targetDays} target days`;
+  }
+
+  function render() {
+    const days = DATA.Days;
+    if (!days.length) {
+      contentEl.innerHTML = '<div class="card"><p class="muted">No history yet — it starts with your first day.</p></div>';
+      return;
+    }
+    const mode = bucketMode(days);
+    const bs = buckets(days, mode);
+    const targetDays = days.filter(d => d.TargetOunces > 0);
+    const metDays = days.filter(d => d.GoalMet).length;
+    const logged = days.filter(d => d.EntryMade);
+    const avg = logged.length ? logged.reduce((s, d) => s + d.ConsumedOunces, 0) / logged.length : 0;
+    const perLabel = { day: 'day', week: 'week (daily average)', month: 'month (daily average)' }[mode];
+
+    const rows = days.slice().reverse().map(d => `
+      <tr>
+        <td>${fmtDate(d.Date, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</td>
+        <td>${fmtOz(d.ConsumedOunces)} oz</td>
+        <td>${d.TargetOunces > 0 ? fmtOz(d.TargetOunces) + ' oz' : '—'}</td>
+        <td>${d.TargetOunces > 0 ? (d.GoalMet ? '<span class="met-yes">✓ Yes</span>' : 'No') : '<span class="muted">No target</span>'}</td>
+      </tr>`).join('');
+
+    contentEl.innerHTML = `
+      <div class="card">
+        <div class="summary">
+          <span>Goal met <b>${metDays}</b> of ${targetDays.length} target days</span>
+          <span>Average <b>${fmtOz(avg)}</b> oz per logged day</span>
+        </div>
+        <div class="chart-wrap" id="chart-wrap"><div class="tip" id="tip"></div></div>
+        <div class="legend">
+          ${mode === 'day'
+            ? '<span><i style="background:var(--green)"></i>✓ Met goal</span><span><i style="background:var(--water)"></i>Short of goal</span>'
+              + (days.some(d => d.TargetOunces <= 0 && d.ConsumedOunces > 0) ? '<span><i style="background:#b9c8d4"></i>No target that day</span>' : '')
+            : '<span><i style="background:var(--water)"></i>Average ounces per day</span>'}
+          <span><i class="line"></i>Target</span>
+          <span>One bar per ${perLabel}</span>
+        </div>
+      </div>
+      <div class="card">
+        <details>
+          <summary>Daily records (${days.length})</summary>
+          <div style="overflow-x:auto;margin-top:0.6rem">
+            <table class="days-table">
+              <thead><tr><th>Date</th><th>Drank</th><th>Target</th><th>Goal met</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </details>
+      </div>`;
+    drawChart(bs, mode);
+  }
+
+  function drawChart(bs, mode) {
+    const wrap = document.getElementById('chart-wrap');
+    const tip = document.getElementById('tip');
+    const width = Math.floor(wrap.clientWidth) || 600;
+    wrap.insertAdjacentHTML('beforeend', chartSvg(bs, width));
+    const svg = wrap.querySelector('svg');
+    function show(ev) {
+      const r = ev.target.closest('.hit');
+      if (!r) { tip.style.display = 'none'; return; }
+      const b = bs[Number(r.dataset.i)];
+      tip.innerHTML = tipHtml(b, mode);
+      const box = wrap.getBoundingClientRect();
+      const rb = r.getBoundingClientRect();
+      const x = Math.min(Math.max(rb.left + rb.width / 2 - box.left, 70), box.width - 70);
+      tip.style.left = x + 'px';
+      tip.style.top = (ev.clientY - box.top - 10) + 'px';
+      tip.style.display = 'block';
+    }
+    svg.addEventListener('pointermove', show);
+    svg.addEventListener('pointerdown', show);
+    svg.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+  }
+
+  async function load() {
+    contentEl.style.opacity = DATA ? '0.5' : '';
+    try {
+      DATA = await fetchData('history', { range });
+      contentEl.style.opacity = '';
+      render();
+    } catch (e) {
+      contentEl.style.opacity = '';
+      handleError(contentEl, e);
+    }
+  }
+
+  document.querySelectorAll('[data-range]').forEach(b => b.addEventListener('click', () => {
+    range = b.dataset.range;
+    document.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    load();
+  }));
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (DATA && DATA.Days.length) render(); }, 150);
+  });
+
+  (async () => {
+    await captureSso();
+    await load();
+  })();
+</script>
+</body>
+</html>

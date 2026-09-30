@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1d6fa5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="HydraTrack">
+<title>HydraTrack</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="bar">
+    <h1>💧 HydraTrack</h1>
+    <nav>
+      <a href="index.html" aria-current="page">Today</a>
+      <a href="history.html">History</a>
+      <a href="stats.html">Stats</a>
+      <a href="goals.html">Goals</a>
+      <a href="containers.html">Containers</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <div id="status"></div>
+  <div id="content">Loading&hellip;</div>
+</main>
+<div id="toast-slot"></div>
+<script src="js/api.js"></script>
+<script>
+  const contentEl = document.getElementById('content');
+  let TODAY = null;
+  let toastTimer = null;
+
+  // ---- progress ring ----
+  function ringSvg(t) {
+    const r = 92;
+    const c = 2 * Math.PI * r;
+    const hasTarget = t.TargetOunces > 0;
+    const pct = hasTarget ? (t.ConsumedOunces / t.TargetOunces) * 100 : 0;
+    const offset = c * (1 - Math.min(pct, 100) / 100);
+    const cap = pct > 0 ? 'round' : 'butt';
+    const center = hasTarget
+      ? `<text class="amount" x="110" y="106" text-anchor="middle">${fmtOz(t.ConsumedOunces)} / ${fmtOz(t.TargetOunces)}</text>
+         <text class="of" x="110" y="128" text-anchor="middle">oz</text>
+         <text class="pct" x="110" y="152" text-anchor="middle">${Math.round(pct)}%</text>`
+      : `<text class="amount" x="110" y="110" text-anchor="middle">${fmtOz(t.ConsumedOunces)} oz</text>
+         <text class="of" x="110" y="134" text-anchor="middle">no goal set for today</text>`;
+    const label = hasTarget
+      ? `${fmtOz(t.ConsumedOunces)} of ${fmtOz(t.TargetOunces)} ounces, ${Math.round(pct)} percent`
+      : `${fmtOz(t.ConsumedOunces)} ounces, no goal today`;
+    return `
+      <svg class="ring ${t.GoalMet ? 'met' : ''}" viewBox="0 0 220 220" role="img" aria-label="${label}">
+        <circle class="track" cx="110" cy="110" r="${r}" fill="none" stroke-width="16"/>
+        <circle class="fill" cx="110" cy="110" r="${r}" fill="none" stroke-width="16"
+          stroke-linecap="${cap}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
+          transform="rotate(-90 110 110)"/>
+        ${center}
+      </svg>`;
+  }
+
+  // ---- per-goal progress ----
+  function goalRowHtml(g) {
+    if (g.Kind === 'container') {
+      const need = Math.ceil(g.TargetQuantity);
+      const done = g.CompletedQuantity;
+      let dots = '';
+      for (let i = 0; i < need; i++) {
+        dots += i < done ? '<span class="dot on" aria-hidden="true">✓</span>' : '<span class="dot" aria-hidden="true"></span>';
+      }
+      const extra = Math.max(0, done - need);
+      for (let i = 0; i < Math.min(extra, 6); i++) dots += '<span class="dot extra" aria-hidden="true">✓</span>';
+      if (extra > 6) dots += `<span class="muted small">+${extra - 6}</span>`;
+      const title = g.Name || `${g.Icon ? g.Icon + ' ' : ''}${g.ContainerName}`;
+      return `
+        <div class="goal-row ${g.Completed ? 'done' : ''}">
+          <div class="head">
+            <span class="title">${escapeHtml(title)} <span class="muted small">· ${fmtOz(g.ContainerOunces)} oz</span></span>
+            <span class="count">${fmtOz(done)} of ${fmtOz(g.TargetQuantity)}${g.Completed ? ' ✓' : ''}</span>
+          </div>
+          <div class="dots">${dots}</div>
+        </div>`;
+    }
+    const pct = g.TargetOunces > 0 ? Math.min(100, (g.LoggedOunces / g.TargetOunces) * 100) : 0;
+    return `
+      <div class="goal-row ${g.Completed ? 'done' : ''}">
+        <div class="head">
+          <span class="title">${escapeHtml(g.Name || 'Extra water')}</span>
+          <span class="count">${fmtOz(g.LoggedOunces)} of ${fmtOz(g.TargetOunces)} oz${g.Completed ? ' ✓' : ''}</span>
+        </div>
+        <div class="meter"><span style="width:${pct.toFixed(1)}%"></span></div>
+      </div>`;
+  }
+
+  function render() {
+    const t = TODAY;
+    if (!t.HasContainers && !t.Goals.length) {
+      contentEl.innerHTML = `
+        <div class="card">
+          <h3>Welcome to HydraTrack</h3>
+          <p>Set up the way you actually drink water:</p>
+          <ol>
+            <li><a href="containers.html">Add your containers</a> — your tumbler, glass, bottle, with their sizes.</li>
+            <li><a href="goals.html">Set a daily goal</a> — like 3 tumblers plus 2 glasses, or a number of ounces.</li>
+          </ol>
+          <p class="muted small">You can also just log ounces below without any setup.</p>
+        </div>` + logSectionHtml(t) + entriesHtml(t);
+      wire();
+      return;
+    }
+    const s = t.Stats;
+    contentEl.innerHTML = `
+      <div class="card">
+        <div class="ring-wrap">${ringSvg(t)}</div>
+        <div class="streaks">
+          <span class="chip">📅 Logging streak <b>${s.CurrentLoggingStreak}</b> ${s.CurrentLoggingStreak === 1 ? 'day' : 'days'}</span>
+          <span class="chip">🎯 Goal streak <b>${s.CurrentGoalStreak}</b> ${s.CurrentGoalStreak === 1 ? 'day' : 'days'}</span>
+        </div>
+        ${t.Goals.length ? `<div style="margin-top:0.8rem">${t.Goals.map(goalRowHtml).join('')}</div>`
+          : `<p class="muted small" style="text-align:center">No goals apply today. <a href="goals.html">Set one up</a>.</p>`}
+      </div>
+      ${logSectionHtml(t)}
+      ${entriesHtml(t)}`;
+    wire();
+  }
+
+  function logSectionHtml(t) {
+    const quick = t.QuickLog.map(c => `
+      <button type="button" class="quick-btn" data-container="${c.Id}" aria-label="Log a ${escapeHtml(c.Name)}, ${fmtOz(c.Ounces)} ounces">
+        <span class="icon">${escapeHtml(c.Icon || '💧')}</span>
+        <span><span class="name"><span class="plus">+</span> ${escapeHtml(c.Name)}</span><span class="oz">${fmtOz(c.Ounces)} oz</span></span>
+      </button>`).join('');
+    return `
+      <div class="card">
+        <h3>Log water</h3>
+        ${quick ? `<div class="quick-grid">${quick}</div>` : ''}
+        <div class="manual-row">
+          <label for="manual-oz" class="inline" style="font-weight:600">Ounces</label>
+          <input type="number" id="manual-oz" min="0" step="any" inputmode="decimal" placeholder="e.g. 10">
+          <button type="button" class="btn" id="manual-add">Add</button>
+        </div>
+      </div>`;
+  }
+
+  function entriesHtml(t) {
+    if (!t.Entries.length) return '';
+    const rows = t.Entries.map(e => `
+      <div class="entry">
+        <span class="time">${escapeHtml(e.Time)}</span>
+        <span class="what">${e.ContainerName ? `${escapeHtml(e.Icon || '💧')} ${escapeHtml(e.ContainerName)}` : 'Entered ounces'}</span>
+        <span class="oz">${fmtOz(e.Ounces)} oz</span>
+        <button type="button" class="icon-btn" data-remove="${e.Id}" aria-label="Remove this ${fmtOz(e.Ounces)} ounce entry" title="Remove">✕</button>
+      </div>`).join('');
+    return `<div class="card"><h3>Today's entries</h3>${rows}</div>`;
+  }
+
+  // ---- actions ----
+  function wire() {
+    contentEl.querySelectorAll('[data-container]').forEach(btn => {
+      btn.addEventListener('click', () => quickLog(btn));
+    });
+    const oz = document.getElementById('manual-oz');
+    const add = document.getElementById('manual-add');
+    if (add) {
+      add.addEventListener('click', () => logManual(oz, add));
+      oz.addEventListener('keydown', ev => { if (ev.key === 'Enter') logManual(oz, add); });
+    }
+    contentEl.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => removeEntry(Number(btn.dataset.remove)));
+    });
+  }
+
+  async function quickLog(btn) {
+    const id = Number(btn.dataset.container);
+    const c = TODAY.QuickLog.find(x => x.Id === id);
+    btn.disabled = true;
+    try {
+      const res = await postAction('quickLog', { containerId: id });
+      showStatus('');
+      TODAY = res.Today;
+      render();
+      offerUndo(res.LogId, `Logged ${c ? c.Name : 'water'} (${fmtOz(c ? c.Ounces : 0)} oz)`);
+    } catch (e) {
+      btn.disabled = false;
+      showStatus(errorText(e, "Couldn't log that. Check your connection and try again."));
+    }
+  }
+
+  async function logManual(input, btn) {
+    const oz = Number(input.value);
+    if (!(oz > 0)) { input.focus(); return; }
+    btn.disabled = true;
+    try {
+      const res = await postAction('logOunces', { ounces: oz });
+      showStatus('');
+      TODAY = res.Today;
+      render();
+      offerUndo(res.LogId, `Logged ${fmtOz(oz)} oz`);
+    } catch (e) {
+      btn.disabled = false;
+      showStatus(errorText(e, "Couldn't log that. Check your connection and try again."));
+    }
+  }
+
+  async function removeEntry(id, fromUndo) {
+    const e = TODAY.Entries.find(x => x.Id === id);
+    if (!fromUndo && !confirm(`Remove this ${e ? fmtOz(e.Ounces) + ' oz ' : ''}entry?`)) return;
+    try {
+      const res = await postAction('deleteLog', { id });
+      showStatus('');
+      TODAY = res.Today;
+      render();
+      if (fromUndo) toast('Undone');
+    } catch (err) {
+      showStatus(errorText(err, "Couldn't remove that entry. Try again."));
+    }
+  }
+
+  // ---- undo toast ----
+  function toast(text, actionLabel, onAction) {
+    const slot = document.getElementById('toast-slot');
+    if (toastTimer) clearTimeout(toastTimer);
+    slot.innerHTML = `<div class="toast" role="status"><span>${escapeHtml(text)}</span>${actionLabel ? `<button type="button">${actionLabel}</button>` : ''}</div>`;
+    if (actionLabel) {
+      slot.querySelector('button').addEventListener('click', () => { slot.innerHTML = ''; onAction(); });
+    }
+    toastTimer = setTimeout(() => { slot.innerHTML = ''; }, actionLabel ? 8000 : 2500);
+  }
+
+  function offerUndo(logId, text) {
+    toast(text, 'Undo', () => removeEntry(logId, true));
+  }
+
+  async function load() {
+    try {
+      TODAY = await fetchData('today');
+      render();
+    } catch (e) {
+      handleError(contentEl, e);
+    }
+  }
+
+  // Coming back to the app (possibly the next morning) refreshes the day.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && TODAY) load();
+  });
+
+  (async () => {
+    await captureSso();
+    await load();
+  })();
+</script>
+</body>
+</html>
